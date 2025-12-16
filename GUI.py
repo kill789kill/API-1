@@ -21,6 +21,8 @@ class ImageProcessor(ctk.CTk):
         self.file_path = None
         self.orig_photo = None  # Store PhotoImage references
         self.curr_photo = None
+        self.n_frames = 1
+        self.current_frame_index = 0
         
         # Setup UI
         self.setup_ui()
@@ -180,6 +182,21 @@ class ImageProcessor(ctk.CTk):
         
         self.processed_canvas = tk.Canvas(self.processed_frame, width=400, height=300, bg="#2b2b2b", highlightthickness=0)
         self.processed_canvas.pack(expand=True, fill="both")  # Center in frame
+
+        # Page controls for multi-page TIFFs (hidden unless needed)
+        # Place the page controls under the original image frame
+        self.page_controls_frame = ctk.CTkFrame(self.original_frame)
+        self.page_label = ctk.CTkLabel(self.page_controls_frame, text="Page: 1/1")
+        self.page_label.pack(side="left", padx=8)
+        self.page_slider = ctk.CTkSlider(
+            self.page_controls_frame,
+            from_=1,
+            to=1,
+            number_of_steps=0,
+            command=self.change_frame
+        )
+        self.page_slider.pack(side="left", fill="x", expand=True, padx=8, pady=6)
+        self.page_controls_frame.pack_forget()
         
         # File info
         self.info_label = ctk.CTkLabel(self.main_frame, text="No image loaded")
@@ -188,7 +205,7 @@ class ImageProcessor(ctk.CTk):
     def load_image(self):
         file_path = filedialog.askopenfilename(
             filetypes=[
-                ("Image files", "*.png *.jpg *.jpeg *.bmp *.tiff"),
+                ("Image files", "*.png *.jpg *.jpeg *.bmp *.tif *.tiff"),
                 ("All files", "*.*")
             ]
         )
@@ -197,9 +214,20 @@ class ImageProcessor(ctk.CTk):
             try:
                 self.file_path = file_path
                 self.original_image = Image.open(file_path)
-                self.current_image = self.original_image.copy()
+
+                # Detect multi-frame images (TIFF pages)
+                try:
+                    self.n_frames = getattr(self.original_image, "n_frames", 1)
+                except Exception:
+                    self.n_frames = 1
+
+                self.current_frame_index = 0
+
+                # Set current image to the first frame
+                self.current_image = self.get_frame_image(self.original_image, self.current_frame_index)
                 
                 # Update UI
+                self.update_page_controls()
                 self.update_image_displays()
                 self.save_btn.configure(state="normal")
                 self.reset_btn.configure(state="normal")
@@ -231,8 +259,11 @@ class ImageProcessor(ctk.CTk):
             if frame_width <= 1 or frame_height <= 1:
                 frame_width, frame_height = 400, 300
             
+            # For multi-frame images, get the selected original frame for display
+            orig_base = self.get_frame_image(self.original_image, self.current_frame_index)
+
             # Resize images to fit frames while maintaining aspect ratio
-            orig_display = self.resize_for_display(self.original_image, (frame_width, frame_height))
+            orig_display = self.resize_for_display(orig_base, (frame_width, frame_height))
             curr_display = self.resize_for_display(self.current_image, (frame_width, frame_height))
             
             # Convert to PhotoImage
@@ -289,12 +320,13 @@ class ImageProcessor(ctk.CTk):
             self.brightness_value.configure(text=f"{brightness:.1f}")
             self.contrast_value.configure(text=f"{contrast:.1f}")
             
-            # Apply adjustments
-            self.current_image = self.original_image.copy()
-            
+            # Apply adjustments using the selected original frame as base
+            base = self.get_frame_image(self.original_image, self.current_frame_index)
+            self.current_image = base.copy()
+
             enhancer = ImageEnhance.Brightness(self.current_image)
             self.current_image = enhancer.enhance(brightness)
-            
+
             enhancer = ImageEnhance.Contrast(self.current_image)
             self.current_image = enhancer.enhance(contrast)
             
@@ -348,6 +380,72 @@ class ImageProcessor(ctk.CTk):
                     messagebox.showinfo("Success", f"Image saved to:\n{save_path}")
                 except Exception as e:
                     messagebox.showerror("Error", f"Failed to save image: {e}")
+
+    def get_frame_image(self, image, index):
+        """Return a copy of the requested frame (page) from a possibly multi-frame image."""
+        if not image:
+            return None
+
+        # Default single-frame
+        try:
+            n = getattr(image, "n_frames", 1)
+        except Exception:
+            n = 1
+
+        if n <= 1:
+            return image.copy()
+
+        # Clamp index
+        if index < 0:
+            index = 0
+        if index >= n:
+            index = n - 1
+
+        try:
+            image.seek(index)
+            frame = image.copy()
+            # Optionally reset to first frame
+            image.seek(0)
+            return frame
+        except Exception:
+            # Fallback to returning a copy of the original
+            try:
+                image.seek(0)
+            except Exception:
+                pass
+            return image.copy()
+
+    def update_page_controls(self):
+        """Show or hide page slider depending on number of frames."""
+        if self.n_frames and self.n_frames > 1:
+            # configure slider range and steps
+            self.page_label.configure(text=f"Page: {self.current_frame_index+1}/{self.n_frames}")
+            self.page_slider.configure(from_=1, to=self.n_frames, number_of_steps=max(0, self.n_frames-1))
+            self.page_slider.set(self.current_frame_index + 1)
+            self.page_controls_frame.pack(side="bottom", fill="x")
+        else:
+            self.page_controls_frame.pack_forget()
+
+    def change_frame(self, val):
+        """Callback when the page slider is moved."""
+        try:
+            page = int(round(float(val))) - 1
+        except Exception:
+            page = 0
+
+        if page < 0:
+            page = 0
+        if page >= self.n_frames:
+            page = self.n_frames - 1
+
+        self.current_frame_index = page
+        # Load the selected frame and reapply sliders
+        base = self.get_frame_image(self.original_image, self.current_frame_index)
+        self.current_image = base.copy()
+        # Reapply brightness/contrast currently set
+        self.update_image_sliders()
+        # Update page label
+        self.page_label.configure(text=f"Page: {self.current_frame_index+1}/{self.n_frames}")
 
 if __name__ == "__main__":
     app = ImageProcessor()
